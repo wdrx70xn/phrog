@@ -1,6 +1,5 @@
 name: alpine
-
-on:
+'on':
   workflow_call:
     inputs:
       release_mode:
@@ -8,121 +7,101 @@ on:
         required: false
         type: string
         default: none
-  workflow_dispatch:
+  workflow_dispatch: null
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
-
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - labeled
 concurrency:
   group: alpine-${{ github.ref }}-${{ inputs.release_mode || 'none' }}
   cancel-in-progress: true
-
 permissions:
   contents: read
-
 jobs:
   alpine:
-    if: inputs.release_mode == 'pr' || inputs.release_mode == 'tag' || github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'apk') && !startsWith(github.event.pull_request.head.ref || '', 'release/v'))
-    runs-on: ubuntu-24.04${{ matrix.arch == 'aarch64' && '-arm' || '' }}
+    if: inputs.release_mode == 'pr' || inputs.release_mode == 'tag' || github.event_name
+      != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'apk')
+      && !startsWith(github.event.pull_request.head.ref || '', 'release/v'))
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            target: x86_64-unknown-linux-musl
-          - arch: aarch64
-            target: aarch64-unknown-linux-musl
+        - arch: x86_64
+          target: x86_64-unknown-linux-musl
+        - arch: aarch64
+          target: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
-      # Using fork (aarch64 branch from bgilbert/setup-alpine) until jirutka/setup-alpine#11 is resolved
-      - uses: samcday/setup-alpine@main
-        id: alpine
-        with:
-          arch: ${{ matrix.arch }}
-          branch: edge
-          packages: alpine-sdk rust cargo
-      - name: setup
-        env:
-          RSA_PRIV: ${{ secrets.RSA_PRIVATE_KEY }}
-          RSA_PUB: ${{ secrets.RSA_PUBLIC_KEY }}
-        run: |
-          mkdir -p ~/.abuild
-          echo "$RSA_PRIV" > ~/.abuild/key.rsa
-          echo "$RSA_PUB" > ~/.abuild/key.rsa.pub
-          cp ~/.abuild/key.rsa.pub /etc/apk/keys/key.rsa.pub
-          abuild -F deps
-        shell: alpine.sh --root {0}
-      - name: update sha
-        if: github.event_name != 'workflow_call' || inputs.release_mode != 'tag'
-        run: |
-          sed -i -e "s/^_gitrev=main$/_gitrev=$GITHUB_SHA/" APKBUILD
-        shell: alpine.sh --root {0}
-      - name: release prep
-        if: inputs.release_mode == 'tag'
-        run: |
-          # Remove _git suffix to indicate the stable release.
-          # Assumes that the base (unsuffixed) pkgver was already updated to the new version in release commit.
-          sed -i -e 's/^\(pkgver=.*\)_git$/\1/' APKBUILD
+    - uses: actions/checkout@v4
+    - uses: samcday/setup-alpine@main
+      id: alpine
+      with:
+        arch: ${{ matrix.arch }}
+        branch: edge
+        packages: alpine-sdk rust cargo
+    - name: setup
+      env:
+        RSA_PRIV: ${{ secrets.RSA_PRIVATE_KEY }}
+        RSA_PUB: ${{ secrets.RSA_PUBLIC_KEY }}
+      run: 'mkdir -p ~/.abuild
 
-          pkgver="$(sed -n 's/^pkgver=//p' APKBUILD)"
-          if [[ "$pkgver" =~ _rc[0-9]+$ ]]; then
-            # Alpine package versions use _rcN while Git tags use -rc.N.
-            release_gitrev="${pkgver/_rc/-rc.}"
-          else
-            release_gitrev="$pkgver"
-          fi
+        echo "$RSA_PRIV" > ~/.abuild/key.rsa
 
-          sed -i -e "s/^_gitrev=.*/_gitrev=${release_gitrev}/" APKBUILD
-        shell: alpine.sh --root {0}
-      - name: build package
-        run: |
-          export PACKAGER_PRIVKEY=$HOME/.abuild/key.rsa
-          abuild -F checksum
-          abuild -F -P /packages
-          mv APKBUILD /packages
-          chmod -R 777 /packages
-          for f in /packages/phrog/${{ matrix.arch }}/*.apk; do
-            mv $f ${f%.apk}-${{ matrix.arch }}.apk
-          done
-        shell: alpine.sh --root {0}
-      - name: build musl binary
-        run: |
-          set -euo pipefail
-          apk_file=""
-          for candidate in /packages/phrog/${{ matrix.arch }}/greetd-phrog-[0-9]*.apk; do
-            if [ -f "$candidate" ]; then
-              apk_file="$candidate"
-              break
-            fi
-          done
+        echo "$RSA_PUB" > ~/.abuild/key.rsa.pub
 
-          if [ -z "$apk_file" ]; then
-            echo "Unable to locate greetd-phrog APK output"
-            ls -R /packages/phrog/${{ matrix.arch }} || true
-            exit 1
-          fi
+        cp ~/.abuild/key.rsa.pub /etc/apk/keys/key.rsa.pub
 
-          mkdir -p dist extract
-          tar -xzf "$apk_file" -C extract ./usr/bin/phrog usr/bin/phrog || true
+        abuild -F deps
 
-          if [ ! -f extract/usr/bin/phrog ]; then
-            echo "Unable to extract usr/bin/phrog from $apk_file"
-            tar -tzf "$apk_file" || true
-            exit 1
-          fi
+        '
+      shell: alpine.sh --root {0}
+    - name: update sha
+      if: github.event_name != 'workflow_call' || inputs.release_mode != 'tag'
+      run: 'sed -i -e "s/^_gitrev=main$/_gitrev=$GITHUB_SHA/" APKBUILD
 
-          install -m755 extract/usr/bin/phrog dist/phrog
-          tar -C dist -czf "dist/phrog-${{ matrix.target }}.tar.gz" phrog
-        shell: alpine.sh --root {0}
-      - uses: actions/upload-artifact@v4
-        if: matrix.arch == 'x86_64'
-        with:
-          name: APKBUILD
-          path: ${{ steps.alpine.outputs.root-path }}/packages/APKBUILD
-      - uses: actions/upload-artifact@v4
-        with:
-          name: packages-${{ matrix.arch }}
-          path: ${{ steps.alpine.outputs.root-path }}/packages/phrog/${{ matrix.arch }}/*.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.target }}
-          path: ${{ steps.alpine.outputs.root-path }}/dist/phrog-${{ matrix.target }}.tar.gz
+        '
+      shell: alpine.sh --root {0}
+    - name: release prep
+      if: inputs.release_mode == 'tag'
+      run: "# Remove _git suffix to indicate the stable release.\n# Assumes that the\
+        \ base (unsuffixed) pkgver was already updated to the new version in release\
+        \ commit.\nsed -i -e 's/^\\(pkgver=.*\\)_git$/\\1/' APKBUILD\n\npkgver=\"\
+        $(sed -n 's/^pkgver=//p' APKBUILD)\"\nif [[ \"$pkgver\" =~ _rc[0-9]+$ ]];\
+        \ then\n  # Alpine package versions use _rcN while Git tags use -rc.N.\n \
+        \ release_gitrev=\"${pkgver/_rc/-rc.}\"\nelse\n  release_gitrev=\"$pkgver\"\
+        \nfi\n\nsed -i -e \"s/^_gitrev=.*/_gitrev=${release_gitrev}/\" APKBUILD\n"
+      shell: alpine.sh --root {0}
+    - name: build package
+      run: "export PACKAGER_PRIVKEY=$HOME/.abuild/key.rsa\nabuild -F checksum\nabuild\
+        \ -F -P /packages\nmv APKBUILD /packages\nchmod -R 777 /packages\nfor f in\
+        \ /packages/phrog/${{ matrix.arch }}/*.apk; do\n  mv $f ${f%.apk}-${{ matrix.arch\
+        \ }}.apk\ndone\n"
+      shell: alpine.sh --root {0}
+    - name: build musl binary
+      run: "set -euo pipefail\napk_file=\"\"\nfor candidate in /packages/phrog/${{\
+        \ matrix.arch }}/greetd-phrog-[0-9]*.apk; do\n  if [ -f \"$candidate\" ];\
+        \ then\n    apk_file=\"$candidate\"\n    break\n  fi\ndone\n\nif [ -z \"$apk_file\"\
+        \ ]; then\n  echo \"Unable to locate greetd-phrog APK output\"\n  ls -R /packages/phrog/${{\
+        \ matrix.arch }} || true\n  exit 1\nfi\n\nmkdir -p dist extract\ntar -xzf\
+        \ \"$apk_file\" -C extract ./usr/bin/phrog usr/bin/phrog || true\n\nif [ !\
+        \ -f extract/usr/bin/phrog ]; then\n  echo \"Unable to extract usr/bin/phrog\
+        \ from $apk_file\"\n  tar -tzf \"$apk_file\" || true\n  exit 1\nfi\n\ninstall\
+        \ -m755 extract/usr/bin/phrog dist/phrog\ntar -C dist -czf \"dist/phrog-${{\
+        \ matrix.target }}.tar.gz\" phrog\n"
+      shell: alpine.sh --root {0}
+    - uses: actions/upload-artifact@v4
+      if: matrix.arch == 'x86_64'
+      with:
+        name: APKBUILD
+        path: ${{ steps.alpine.outputs.root-path }}/packages/APKBUILD
+    - uses: actions/upload-artifact@v4
+      with:
+        name: packages-${{ matrix.arch }}
+        path: ${{ steps.alpine.outputs.root-path }}/packages/phrog/${{ matrix.arch
+          }}/*.apk
+    - uses: actions/upload-artifact@v4
+      with:
+        name: release-${{ matrix.target }}
+        path: ${{ steps.alpine.outputs.root-path }}/dist/phrog-${{ matrix.target }}.tar.gz
